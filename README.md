@@ -64,9 +64,10 @@ for reference: [`gamma.jpg`](./gamma.jpg).*
   **37–70% worse** on resnet18 — the filter was silently breaking the GA's
   elitism guarantee. I root-caused it to four specific bugs, fixed them, and
   re-validated with seeded A/B runs across multiple models.
-- **Where it landed**: across 20 seeded A/B trials (4 CNN models × 5 seeds),
-  the fixed filter matched or beat the no-filter baseline in **15/20 (75%)**,
-  while consistently skipping **~10% of MAESTRO calls** on every model (see
+- **Where it landed**: across 30 seeded A/B trials (6 unique CNN layer
+  configurations spanning 12 named backbones × 5 seeds), the fixed filter
+  matched or beat the no-filter baseline in **21/30 (70%)**, while
+  consistently skipping **~10% of MAESTRO calls** on every configuration (see
   [Results](#results) for the full table and honest caveats).
 
 ## The bug story (the part worth telling in an interview)
@@ -116,42 +117,65 @@ budget, before vs. after the fix:
 GEN-50/POP-20): Q-filter was consistently **37–70% worse** than the
 no-filter baseline.
 
-**After the fix** — 4 CNN backbones × 5 seeds each, single layer,
+**After the fix** — 12 named CNN backbones × 5 seeds each, single layer,
 GEN-50/POP-50, `--seed` pinned per trial for a fair filter-on vs. filter-off
-comparison (raw per-seed numbers: [`benchmarks/qfilter_ab_results.csv`](benchmarks/qfilter_ab_results.csv)):
+comparison (raw per-seed numbers:
+[`benchmarks/qfilter_ab_results.csv`](benchmarks/qfilter_ab_results.csv) +
+[`benchmarks/qfilter_ab_results_extended.csv`](benchmarks/qfilter_ab_results_extended.csv)).
 
-| Model | Q-filter ≥ baseline | Median latency, no filter | Median latency, Q-filter | MAESTRO calls saved |
+**Important caveat about the "12 backbones" framing**: several of these
+networks share an *identical* first-layer shape (many ResNet-family stems
+are literally `64×3×224×224, 7×7`), so testing layer 1 of `resnet18`,
+`resnet50`, `googlenet`, `wide_resnet50`, and `resnext50_32x4d` is the
+*same search problem* run 5 times under different names — not 5
+independent data points. Deduplicating by actual layer shape, there are
+**6 genuinely distinct configurations** across the 12 named models. The
+table below reports results per unique configuration, not per model name,
+so the numbers aren't artificially inflated by counting duplicates as
+independent evidence:
+
+| Configuration (models sharing it) | Q-filter ≥ baseline | Median latency, no filter | Median latency, Q-filter | MAESTRO calls saved |
 |---|---|---|---|---|
-| resnet18 | 3/5 | 149 | 103 | 10.7% |
+| resnet-stem (resnet18, resnet50, googlenet, wide_resnet50, resnext50_32x4d) | 3/5 | 149 | 103 | 10.7% |
 | vgg16 | 4/5 | 51,067 | 50,161 | 10.0% |
-| mobilenet_v2 | 4/5 | 26,797 | 333 | 9.7% |
-| squeezenet | 4/5 | 149 | 54 | 10.4% |
-| **Overall** | **15/20 (75%)** | — | — | **~10%** |
+| mobilenet-stem (mobilenet_v2, mnasnet) | 4/5 | 26,797 | 333 | 9.7% |
+| squeezenet-stem (squeezenet, densenet) | 4/5 | 149 | 54 | 10.4% |
+| alexnet | 2/5 | 343 | 366 | 11.2% |
+| shufflenet_v2 | 4/5 | 169 | 38 | 9.7% |
+| **Overall (30 unique trials)** | **21/30 (70%)** | — | — | **~10.3%** |
 
 Caveats, stated plainly:
 - These are single-layer searches at GEN-50/POP-50 — small enough that
-  run-to-run variance from the GA's own randomness is real. A couple of
-  individual seeds show 10-80x swings in either direction (e.g. mobilenet_v2
+  run-to-run variance from the GA's own randomness is real. Individual
+  seeds show 10-80x swings in either direction (e.g. mobilenet-stem
   seed 2: 26,797 → 333), which is why the headline number is a **win rate**
-  (matched-or-beat baseline in 15/20 trials) rather than an average — an
-  arithmetic or geometric mean here would be dominated by a few outlier
+  (matched-or-beat baseline in 21/30 unique trials) rather than an average —
+  an arithmetic or geometric mean here would be dominated by a few outlier
   seeds and overstate precision the data doesn't support.
-- The one clear loss is resnet18, where the filter beat the baseline in only
-  3/5 seeds — still not a fully solved problem, and worth digging into
+- Two configurations are clear weak points: resnet-stem (3/5) and, newly
+  found in this expanded pass, **alexnet (2/5)** — its large 11×11 first-layer
+  kernel is a distinct enough shape from the others that it's plausibly a
+  real edge case, not noise. Not a fully solved problem; worth digging into
   further (see [Limitations](#limitations--future-work)).
 - The fix trades away most of the *aggressive* skipping the original
   (broken) version did. MAESTRO-call savings are a consistent **~10%**
-  across all four models now — modest, but that consistency (vs. the wildly
-  model-dependent behavior of the old hardcoded threshold) is itself the
-  point. Recovering bigger compute savings would need more validation data
-  before trusting a larger `relative_margin`.
+  across every configuration now — modest, but that consistency (vs. the
+  wildly model-dependent behavior of the old hardcoded threshold) is itself
+  the point. Recovering bigger compute savings would need more validation
+  data before trusting a larger `relative_margin`.
 
 ## Limitations & Future Work
 
-- **resnet18 is still the weakest case (3/5 wins)** — worth profiling why
-  specifically; a plausible hypothesis is that resnet18's smaller/skip-heavy
-  layer shapes produce a different feasibility landscape than the other
-  three models, but that's a hypothesis, not something I've verified yet.
+- **Two configurations are still weak spots: resnet-stem (3/5) and alexnet
+  (2/5).** Worth profiling why specifically; a plausible hypothesis is that
+  these particular layer shapes produce a different feasibility landscape
+  than the other four configurations, but that's a hypothesis, not
+  something I've verified yet.
+- **"12 named backbones" is 6 unique layer configurations.** Several
+  ResNet-family networks share an identical first-layer shape, so testing
+  layer 1 of each isn't 12 independent data points — see the caveat in
+  [Results](#results). A true 12-architecture validation would need to test
+  a later, differentiating layer for each network, not just layer 1.
 - **Only tested on CONV-style CNN backbones.** Transformer/GEMM-style layers
   (BERT, T5, ALBERT — all in `data/model/`) reshape the genome differently
   (`SzM, SzN, SzK` instead of `K, C, Y, X, R, S`) and weren't part of this
