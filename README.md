@@ -70,44 +70,6 @@ for reference: [`gamma.jpg`](./gamma.jpg).*
   consistently skipping **~10% of MAESTRO calls** on every configuration (see
   [Results](#results) for the full table and honest caveats).
 
-## The bug story (the part worth telling in an interview)
-
-The first version of the filter tracked a single Q-value per genome "state"
-(spatial dimension + loop order) using an epsilon-greedy skip rule. It looked
-reasonable in isolation, but four separate issues compounded into a filter
-that made the search *worse*, not faster-and-equal:
-
-1. **Elites weren't protected.** Each generation's population is
-   `elite + offspring`. The filter's skip mask was applied to *everyone*,
-   including elites carried over from the previous generation. A skipped
-   elite got a synthetic `-Inf` fitness, which corrupts the population's
-   fitness array and can demote the true best-known genome out of the parent
-   pool for crossover — breaking the invariant that elitism exists to
-   guarantee (best-known fitness never regresses generation to generation).
-   This was the dominant cause of the regression.
-2. **One bad sample could gate a genome family permanently.** The original
-   `should_evaluate` had no minimum-sample floor — a single infeasible
-   result could tip a state below the skip threshold immediately.
-3. **Infeasible results were blended into the same reward average as real
-   scores.** Rejected genomes were folded in as a `-1e6` sentinel into the
-   same exponential moving average as genuine MAESTRO rewards. States near
-   the feasibility boundary — often exactly where the best mappings live —
-   have many infeasible neighbors, so their average got dragged down and the
-   filter pruned exactly the region the GA needed to keep exploring.
-4. **The skip threshold was a hand-tuned absolute constant** calibrated by
-   eyeballing one model's (resnet18) reward magnitudes. Latency/energy/area
-   rewards differ by orders of magnitude across models and layers, so a
-   fixed constant that works for one model can silently disable the filter
-   (or over-prune) on another — which is what I'd originally noticed as
-   "it doesn't work well for a few of the models."
-
-Fix applied: elites are now always force-evaluated; infeasibility is tracked
-as a separate per-state counter instead of polluting the reward signal; a
-state needs `min_samples` observations before it can be skipped at all; and
-the skip threshold is now relative to the best reward observed *in that run*
-rather than a hardcoded number, so it self-calibrates per model/layer instead
-of needing re-tuning. See [`src/GAMMA/q_filter.py`](src/GAMMA/q_filter.py).
-
 ## Results
 
 Seeded A/B comparison (`--seed`, filter on vs. off), same generation/population
